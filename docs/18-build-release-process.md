@@ -1,0 +1,272 @@
+# 18 — Build & Release Process
+
+## Semantic Versioning
+
+Follow SemVer: `MAJOR.MINOR.PATCH`
+
+| Version bump | When |
+|---|---|
+| `PATCH` (1.0.0 → 1.0.1) | Bug fixes, no new features |
+| `MINOR` (1.0.0 → 1.1.0) | New backward-compatible features |
+| `MAJOR` (1.0.0 → 2.0.0) | Breaking changes |
+
+---
+
+## Branching Strategy (Git Flow)
+
+```
+main              ← production releases only (tagged)
+  └── develop     ← integration branch (all features merge here)
+       ├── feature/lead-management
+       ├── feature/dashboard-charts
+       ├── bugfix/login-redirect-issue
+       └── hotfix/critical-auth-bug (branches from main)
+```
+
+### Branch Rules
+
+| Branch | Rule |
+|---|---|
+| `main` | Protected; requires PR + 2 approvals; CI must pass |
+| `develop` | Protected; requires PR + 1 approval; CI must pass |
+| `feature/*` | Created from `develop`; merged to `develop` |
+| `bugfix/*` | Created from `develop`; merged to `develop` |
+| `hotfix/*` | Created from `main`; merged to BOTH `main` and `develop` |
+| `release/*` | Created from `develop`; merged to `main` and `develop` |
+
+---
+
+## Commit Message Convention (Conventional Commits)
+
+```
+type(scope): subject
+
+body (optional)
+
+footer (optional)
+```
+
+**Types**:
+- `feat` — new feature
+- `fix` — bug fix
+- `docs` — documentation only
+- `style` — formatting (no logic change)
+- `refactor` — refactoring (no feature/fix)
+- `test` — adding or fixing tests
+- `chore` — build process, tooling
+- `perf` — performance improvement
+- `ci` — CI/CD changes
+
+**Examples**:
+
+```
+feat(leads): add lead assignment to team members
+
+fix(auth): refresh token loop on expired session
+
+feat(dashboard)!: redesign dashboard layout
+
+BREAKING CHANGE: DashboardComponent no longer accepts `data` input, use service instead.
+```
+
+---
+
+## Automated Changelog (standard-version)
+
+```bash
+npm install --save-dev standard-version
+
+# Patch release (fixes only)
+npx standard-version --release-as patch
+
+# Minor release (new features)
+npx standard-version --release-as minor
+
+# Major release
+npx standard-version --release-as major
+```
+
+This automatically:
+1. Bumps version in `package.json`
+2. Updates `CHANGELOG.md` from commit messages
+3. Creates a git tag
+
+---
+
+## Release Flow
+
+```bash
+# 1. Create release branch from develop
+git checkout develop
+git pull origin develop
+git checkout -b release/1.2.0
+
+# 2. Bump version
+npx standard-version --release-as minor
+
+# 3. Run final tests
+npm run test:ci
+npm run build:prod
+
+# 4. Merge to main
+git checkout main
+git merge release/1.2.0 --no-ff -m "Release v1.2.0"
+git tag v1.2.0
+git push origin main --tags
+
+# 5. Merge back to develop
+git checkout develop
+git merge release/1.2.0 --no-ff
+git push origin develop
+
+# 6. Delete release branch
+git branch -d release/1.2.0
+```
+
+---
+
+## Hotfix Flow
+
+```bash
+# Branch from MAIN (not develop)
+git checkout main
+git checkout -b hotfix/auth-token-expiry
+
+# Fix the bug
+# ...
+
+# Bump patch version
+npx standard-version --release-as patch
+
+# Merge to main AND develop
+git checkout main
+git merge hotfix/auth-token-expiry --no-ff
+git tag v1.1.1
+git push origin main --tags
+
+git checkout develop
+git merge hotfix/auth-token-expiry --no-ff
+git push origin develop
+```
+
+---
+
+## Package.json Scripts for Release
+
+```json
+{
+  "scripts": {
+    "release:patch": "standard-version --release-as patch",
+    "release:minor": "standard-version --release-as minor",
+    "release:major": "standard-version --release-as major",
+    "release:dry": "standard-version --dry-run"
+  }
+}
+```
+
+---
+
+## CI/CD Release Pipeline
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install & Build
+        run: |
+          npm ci
+          npm run build:prod
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: |
+          docker build -t myapp:${{ steps.version.outputs.VERSION }} .
+          docker tag myapp:${{ steps.version.outputs.VERSION }} myapp:latest
+
+      - name: Push to registry
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          docker push myapp:${{ steps.version.outputs.VERSION }}
+          docker push myapp:latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/**/*.js
+            CHANGELOG.md
+```
+
+---
+
+## CHANGELOG.md Structure
+
+Auto-generated by `standard-version`:
+
+```markdown
+# Changelog
+
+## [1.2.0] - 2024-03-15
+
+### Features
+- **leads:** add lead assignment to team members (#45)
+- **dashboard:** add weekly performance chart (#52)
+
+### Bug Fixes
+- **auth:** fix refresh token loop on expired session (#48)
+
+### Performance
+- **leads-table:** virtual scroll for lists over 200 items (#50)
+
+## [1.1.1] - 2024-03-10
+
+### Bug Fixes
+- **auth:** token not cleared on logout in Firefox (#47)
+```
+
+---
+
+## Environment Promotion
+
+```
+developer → feature branch
+feature branch → develop (CI tests run)
+develop → staging (auto-deploy on merge)
+staging → main (manual approval required)
+main → production (auto-deploy on tag)
+```
+
+---
+
+## Rollback
+
+```bash
+# Quick rollback via Docker image tag
+docker pull myapp:v1.1.1
+kubectl set image deployment/frontend frontend=myapp:v1.1.1
+
+# Git rollback (create a new revert commit — never force push main)
+git revert <commit-sha>
+git push origin main
+```
